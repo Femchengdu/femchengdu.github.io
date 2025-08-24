@@ -1,0 +1,303 @@
+html
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PWA Location Tracker</title>
+    <meta name="mobile-web-app-capable" content="yes" />
+    <link rel="manifest" href="manifest.json" />
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 1rem;
+            background: #f8f9fa;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        #container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+
+        button {
+            padding: 12px 24px;
+            font-size: 1.2rem;
+            margin: 0.5rem;
+            cursor: pointer;
+        }
+
+        #status {
+            margin-top: 1rem;
+            font-weight: bold;
+        }
+
+        #map {
+            height: 400px;
+            width: 100%;
+            display: none;
+            margin-top: 1rem;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+        }
+
+        #controls,
+        #mapView {
+            width: 100%;
+            max-width: 480px;
+            text-align: center;
+        }
+
+        #exportBtn {
+            margin-top: 1rem;
+        }
+    </style>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css"
+        integrity="sha256-sA+e2qfJ655v9+p5PY8CKcZ+At4myXoNcIoMZ6+DzGI=" crossorigin="" />
+</head>
+
+<body>
+    <div id="container">
+        <div id="controls"> <button id="startStopBtn">Start Tracking</button> <button id="showMapBtn"
+                style="display:none">Show Recorded Trip</button>
+            <div id="status">Idle</div>
+        </div>
+        <div id="mapView" style="display:none">
+            <button id="backBtn">Back to Controls</button>
+            <div id="map"></div>
+            <button id="exportBtn">Export Data as JSON</button>
+        </div>
+    </div>
+    <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"
+        integrity="sha256-n59FQZ/L9kWmQ6DdAe3RSX733wbsUK9oEdIw6J6vtkM=" crossorigin=""></script>
+    <script>
+        // Globals
+        let isTracking = false;
+        let watchId = null;
+        let locationData = [];
+        let timerId = null;
+
+        // UI elements
+        const startStopBtn = document.getElementById('startStopBtn');
+        const showMapBtn = document.getElementById('showMapBtn');
+        const statusDiv = document.getElementById('status');
+        const controlsDiv = document.getElementById('controls');
+        const mapViewDiv = document.getElementById('mapView');
+        const backBtn = document.getElementById('backBtn');
+        const exportBtn = document.getElementById('exportBtn');
+
+        // IndexedDB Setup for offline storage
+        let db;
+        const DB_NAME = 'LocationDB';
+        const STORE_NAME = 'locations';
+
+        function openDB() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open(DB_NAME, 1);
+                
+                request.onerror = () => reject('Error opening IndexedDB');
+                
+                request.onsuccess = () => {
+                    db = request.result;
+                    resolve(db);
+                };
+                
+                request.onupgradeneeded = (event) => {
+                    let db = event.target.result;
+                    if (!db.objectStoreNames.contains(STORE_NAME)) {
+                        db.createObjectStore(STORE_NAME, { keyPath: 'timestamp' });
+                    }
+                };
+            });
+        }
+
+        async function saveLocation(point) {
+            return new Promise((resolve, reject) => {
+                if (!db) resolve();
+                
+                const tx = db.transaction(STORE_NAME, 'readwrite');
+                const store = tx.objectStore(STORE_NAME);
+                const request = store.put(point);
+                
+                request.onsuccess = () => resolve();
+                request.onerror = () => reject('Error saving data');
+            });
+        }
+
+        async function loadLocations() {
+            return new Promise((resolve, reject) => {
+                if (!db) resolve([]);
+                
+                const tx = db.transaction(STORE_NAME, 'readonly');
+                const store = tx.objectStore(STORE_NAME);
+                const request = store.getAll();
+                
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject('Error loading data');
+            });
+        }
+
+        async function clearLocations() {
+            return new Promise((resolve, reject) => {
+                if (!db) resolve();
+                
+                const tx = db.transaction(STORE_NAME, 'readwrite');
+                const store = tx.objectStore(STORE_NAME);
+                const request = store.clear();
+                
+                request.onsuccess = () => resolve();
+                request.onerror = () => reject('Error clearing data');
+            });
+        }
+
+        // Location tracking every 15 seconds manually (better control for PWA on iOS)
+        async function startTracking() {
+            if (!navigator.geolocation) {
+                statusDiv.textContent = 'Geolocation not supported by your browser';
+                return;
+            }
+
+            locationData = [];
+            await clearLocations();
+            statusDiv.textContent = 'Starting location tracking...';
+            isTracking = true;
+            startStopBtn.textContent = 'Stop Tracking';
+            showMapBtn.style.display = 'none';
+
+            // Immediate location fetch then every 15 seconds
+            const fetchLocation = () => {
+                navigator.geolocation.getCurrentPosition(
+                    async (pos) => {
+                        const point = {
+                            latitude: pos.coords.latitude,
+                            longitude: pos.coords.longitude,
+                            timestamp: Date.now(),
+                        };
+                        
+                        locationData.push(point);
+                        await saveLocation(point);
+                        statusDiv.textContent = `Tracking: ${locationData.length} points recorded.`;
+                    },
+                    (error) => {
+                        statusDiv.textContent = `Error getting location: ${error.message}`;
+                    },
+                    { enableHighAccuracy: true }
+                );
+            };
+
+            fetchLocation();
+            timerId = setInterval(fetchLocation, 15000);
+        }
+
+        async function stopTracking() {
+            isTracking = false;
+            startStopBtn.textContent = 'Start Tracking';
+            statusDiv.textContent = 'Tracking stopped.';
+            clearInterval(timerId);
+            timerId = null;
+            showMapBtn.style.display = locationData.length > 0 ? 'inline-block' : 'none';
+        }
+
+        // Event listeners
+        startStopBtn.onclick = () => {
+            if (isTracking) {
+                stopTracking();
+            } else {
+                startTracking();
+            }
+        };
+
+        showMapBtn.onclick = async () => {
+            controlsDiv.style.display = 'none';
+            mapViewDiv.style.display = 'block';
+            await showMap();
+        };
+
+        backBtn.onclick = () => {
+            mapViewDiv.style.display = 'none';
+            controlsDiv.style.display = 'block';
+        };
+
+        exportBtn.onclick = async () => {
+            const allLocations = await loadLocations();
+            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(allLocations));
+            const a = document.createElement('a');
+            a.setAttribute('href', dataStr);
+            a.setAttribute('download', 'location_data.json');
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+        };
+
+        // Map variables
+        let map;
+        let polyline;
+
+        async function showMap() {
+            // Load stored locations
+            const locations = await loadLocations();
+            
+            if (!map) {
+                map = L.map('map').setView([0, 0], 13);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    maxZoom: 19,
+                    attribution: '© OpenStreetMap contributors',
+                }).addTo(map);
+            }
+            
+            if (polyline) {
+                map.removeLayer(polyline);
+            }
+            
+            if (locations.length === 0) {
+                statusDiv.textContent = 'No location data to display on map.';
+                return;
+            }
+
+            // Extract LatLng array for polyline
+            const latlngs = locations.map((loc) => [loc.latitude, loc.longitude]);
+            polyline = L.polyline(latlngs, { color: 'blue' }).addTo(map);
+
+            // Center map on the route midpoint
+            const bounds = polyline.getBounds();
+            map.fitBounds(bounds);
+
+            // Show the map container
+            document.getElementById('map').style.display = 'block';
+        }
+
+        // Initialize app when page loads
+        openDB().then(() => {
+            statusDiv.textContent = 'Ready';
+            
+            // Show "Show Map" button if data exists from previous session
+            loadLocations().then((data) => {
+                if (data.length > 0) {
+                    locationData = data;
+                    showMapBtn.style.display = 'inline-block';
+                }
+            });
+        }).catch((err) => {
+            statusDiv.textContent = err;
+        });
+    </script>
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./service-worker.js')
+                    .then(() => console.log('Service Worker registered'))
+                    .catch((e) => console.error('Service Worker registration failed:', e));
+            });
+        }
+    </script>
+</body>
+
+</html>
